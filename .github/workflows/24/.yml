@@ -1,0 +1,85 @@
+name: VPS RDP via Tailscale (A)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      ts_api_key:
+        description: "Tailscale API key (device admin, no 'Bearer')"
+        required: true
+      ts_authkey:
+        description: "Tailscale auth key (reusable or ephemeral)"
+        required: true
+      gh_api_token:
+        description: "GitHub Personal Access Token (classic; scopes: repo, workflow)"
+        required: true
+
+concurrency:
+  group: tailscale-rdp-singleton
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RDP_USER: bullettemporary
+  RDP_PASS: Bullet@12345
+  TS_HOSTNAME: bullet
+
+jobs:
+  rdp:
+    runs-on: self-hosted   # 👈 VPS runner
+    timeout-minutes: 0     # 👈 no limit
+    steps:
+      - name: Update & install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl unzip xrdp jq
+
+      - name: Install Tailscale (if missing) & show version
+        run: |
+          if ! command -v tailscale &> /dev/null; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          sudo systemctl enable --now tailscaled
+          tailscale version
+
+      - name: Enable RDP user + firewall
+        run: |
+          sudo useradd -m -s /bin/bash $RDP_USER || true
+          echo "$RDP_USER:$RDP_PASS" | sudo chpasswd
+          sudo usermod -aG sudo $RDP_USER
+          sudo systemctl enable --now xrdp
+          sudo ufw allow 3389/tcp || true
+
+      - name: Tailscale up (hostname=bullet) + show IP
+        id: up
+        run: |
+          sudo tailscale logout || true
+          sudo tailscale up --authkey "${{ inputs.ts_authkey }}" --hostname "$TS_HOSTNAME" --accept-routes --accept-dns=false
+          sleep 2
+          ip4=$(tailscale ip -4 | head -n1)
+          fqdn=$(tailscale status --json | jq -r '.Self.DNSName')
+          echo "ip4=$ip4"   >> $GITHUB_OUTPUT
+          echo "fqdn=$fqdn" >> $GITHUB_OUTPUT
+          echo "### RDP (A)" >> $GITHUB_STEP_SUMMARY
+          echo "Host: $TS_HOSTNAME" >> $GITHUB_STEP_SUMMARY
+          echo "IPv4: $ip4" >> $GITHUB_STEP_SUMMARY
+          echo "MagicDNS: $fqdn" >> $GITHUB_STEP_SUMMARY
+          echo "User: $RDP_USER" >> $GITHUB_STEP_SUMMARY
+          echo "Pass: $RDP_PASS" >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep alive forever
+        run: |
+          while true; do
+            echo "RDP alive... ($(date))"
+            sleep 60
+          done
+          
